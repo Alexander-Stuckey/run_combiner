@@ -134,7 +134,7 @@ def CheckPermissions(currentDir):
     return (currentDir, False)
 
 
-def MergeFiles(currentDir, samples):
+def MergeFiles(currentDir, samples, keep_samples):
     """
     Merges the files that are passed in to the function. If the output file already exists, and the script is in this function, then the 
     output file is likely to be the result of a failed run of the script and can be safely removed (which the script does).
@@ -167,12 +167,16 @@ def MergeFiles(currentDir, samples):
                         f.write(line)
             
             subprocess.Popen(["gzip", merged_name], cwd=outfolder)
-    
+            
+            delete_samples(currentDir, samples, keep_samples)
+            
     except Exception as e: #The error catching code here catches all errors, as I don't know what errors the script might throw.
         logging.error("An error has occurred while running.")
         logging.error(e)
 
-
+def delete_samples(currentDir, samples, keep_samples):
+    if not keep_samples:
+        pass
 
 def default_logger(msg):
     """
@@ -254,7 +258,7 @@ def main(config_):
                 for key in sample_groups:
                     for value in sample_groups[key]:
                         for item in value:
-                            MergeFiles(key, item)
+                            MergeFiles(key, item, config_["runs"]["keep_original_files"])
                     UpdateCompleted(directory[0], Inbox)
                     logging.info("Merging completed on {}".format(directory[0]))
             else:

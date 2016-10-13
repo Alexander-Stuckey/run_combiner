@@ -1,3 +1,19 @@
+"""
+Script to automatically merge samples split across multiple lanes back into one
+fastq file. It requires a configuration file in .yaml format as input.
+The format of the config file should be as follows:
+
+email:
+    admin: email address
+runs:
+    in_folder: path/to/input_folder
+    out_folder: path/to/output_folder
+    keep_original_files: yes
+logging:
+    log_file_name: path/to/log_file
+"""
+
+import argparse
 import re
 import os
 import subprocess
@@ -5,6 +21,8 @@ import glob
 from email.mime.text import MIMEText
 import logging
 from time import strftime, gmtime
+import yaml
+from dask.compatibility import FileNotFoundError
 
 '''
 Check for the existence of files. It will check for the list of completed runs, and any gzipped, merged files that the script wants to make.
@@ -12,7 +30,7 @@ Check for the existence of files. It will check for the list of completed runs, 
 def Check(dirPath, name):
     if (name == ".completed"):
         if not (os.path.isfile(dirPath + name)):
-            subprocess.call(["touch", Inbox + ".completed"])
+            subprocess.call(["touch", dirPath + ".completed"])
         else:
             pass
     elif (os.path.splitext(name)[1] == ".gz"):
@@ -41,10 +59,10 @@ def SendMail(subject, message):
 '''
 Return all non-hidden folders (no dot folders)
 '''
-def ListDirNoHidden(path):
+def ListDirNoHidden(dirPath):
     allPaths = []
-    for fname in os.listdir(Inbox):
-        path = os.path.join(Inbox, fname)
+    for fname in os.listdir(dirPath):
+        path = os.path.join(dirPath, fname)
         if os.path.isdir(path):
             allPaths.append(path)
     return allPaths
@@ -52,16 +70,16 @@ def ListDirNoHidden(path):
 '''
 Get the completed runs before we start so that we don't try to process any run twice.
 '''
-def GetCompleted():
-    with open(Inbox + ".completed") as f:
+def GetCompleted(dirPath):
+    with open(os.path.join(dirPath,".completed"), "r") as f:
         completed_runs = [ line.strip() for line in f]
     return completed_runs
 
 '''
 Update the completed runs list
 '''
-def UpdateCompleted(completed_dir):
-    with open(Inbox+".completed", "a") as f:
+def UpdateCompleted(completed_dir, dirPath):
+    with open(os.path.join(dirPath,".completed"), "a") as f:
         f.write(completed_dir + "\n")
 
 '''
@@ -152,47 +170,108 @@ def MergeFiles(currentDir, samples):
         logging.error(e)
 
 
-'''
-Run the script
-'''
 
-Inbox = "/Users/alexanderstuckey/Projects/LiClipse_Workspace/Run_Combiner/"
-Check(Inbox, ".completed")
+def default_logger(msg):
+    current_dir = os.path.dirname(os.path.realpath(__file__))
+    logging.basicConfig(filename=os.path.join(current_dir, "run_combiner_config_error.log"), level = logging.INFO)
+    logging.error(msg)
+    print "A config file error has occurred. Please see the error message in {}.".format(os.path.join(current_dir,"run_combiner_config_error.log"))
+    
 
-logging.basicConfig(filename=os.path.join(Inbox, "Sample_merger.log"), level = logging.INFO)
-logging.info("Merging script started at {}".format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
-
-completed = GetCompleted()
-directories = ListDirNoHidden(Inbox)
-permissions = [CheckPermissions(directory) for directory in directories if directory not in completed]
-
-writable_directories = [directory for directory in permissions if True in directory]
-unwritable_directories = [directory for directory in permissions if (directory not in writable_directories and directory not in completed)]
-
-for directory in unwritable_directories:
-    subject = "Unwritable directories that are not completed"
-    message = "The directory {} is unwritable. Please look into this and fix.".format(directory[0])
-    SendMail(subject, message)
-    logging.warning(message)
-
-for directory in writable_directories:
-    logging.info("Working on {}".format(directory[0]))
-    md5status = Checkmd5(directory[0])
-
-    if (md5status == 0):
-        logging.info("md5sum for {} is good, proceeding".format(directory[0]))
-        files_for_merging = FilesToBeMerged(directory)
-        sample_groups = GroupSamples(directory, files_for_merging)
-        for key in sample_groups:
-            for value in sample_groups[key]:
-                for item in value:
-                    MergeFiles(key, item)
-        UpdateCompleted(directory[0])
-        logging.info("Merging completed on {}".format(directory[0]))
+def check_config(config_):
+    """ Check that the config file is formatted properly"""
+    
+    if "email" not in config_:
+        default_logger("Email field missing from config file. Please add a valid email field in the config file")
+        raise KeyError
     else:
-        subject = "Non matching md5 sums"
-        message = "The md5 sum for {} is not correct, either files are still copying or an error has occurred during copying.".format(directory[0])
-        SendMail(subject, message)
-        logging.warning(message)
+        if "admin" not in config_["email"]:
+            default_logger("The email field is present, but missing the admin email. Please enter the admin email in the following format: admin: email@address")
+            raise KeyError
+    
+    if "runs" not in config_:
+        default_logger("Runs field missing from config file. Please add a valid runs field in the config file.")
+        raise KeyError
+    else:
+        if "in_folder" not in config_["runs"]:
+            default_logger("The input folder path is missing from the config file. Please enter the input folder path in the following format: in_folder: /path/to/input_folder")
+            raise KeyError
+        elif "out_folder" not in config_["runs"]:
+            default_logger("The output folder path is missing from the config file. Please enter the output folder path in the following format: out_folder: /path/to/out_folder")
+            raise KeyError
+        elif "keep_original_files" not in config_["runs"]:
+            default_logger("Please indicate if you would like to keep the original files. Valid entries are yes|no, True|False. Add it to the config file in he following format: keep_original_files: yes")
+            raise KeyError
+    
+    if "logging" not in config_:
+        default_logger("Logging field missing from config file. Please add a valid logging field in the config file.")
+        raise KeyError
+        if "log_file" not in config_["logging"]:
+            default_logger("The log file name is missing from the config file. Please enter a valid log file name in the following format: log_file_name: file_name.log")
+            raise KeyError 
 
-logging.info("Merging script finished at {}".format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+def main(config_):
+    if config_ is not None:
+        try:
+            check_config(config_)
+        except KeyError as key_error:
+            raise key_error
+            
+        Inbox = config_["runs"]["in_folder"]
+        Check(Inbox, ".completed")
+        
+        logging.basicConfig(filename=os.path.join(config_["logging"]["log_file"]), level = logging.INFO)
+        logging.info("Merging script started at {}".format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+        
+        completed = GetCompleted(Inbox)
+        directories = ListDirNoHidden(Inbox)
+        permissions = [CheckPermissions(directory) for directory in directories if directory not in completed]
+                       
+        writable_directories = [directory for directory in permissions if True in directory]
+        unwritable_directories = [directory for directory in permissions if (directory not in writable_directories and directory not in completed)]
+        
+        for directory in unwritable_directories:
+            subject = "Unwritable directories that are not completed"
+            message = "The directory {} is unwritable. Please look into this and fix.".format(directory[0])
+            SendMail(subject, message)
+            logging.warning(message)
+
+            for directory in writable_directories:
+                logging.info("Working on {}".format(directory[0]))
+                md5status = Checkmd5(directory[0])
+
+                if (md5status == 0):
+                    logging.info("md5sum for {} is good, proceeding".format(directory[0]))
+                    files_for_merging = FilesToBeMerged(directory)
+                    sample_groups = GroupSamples(directory, files_for_merging)
+                    for key in sample_groups:
+                        for value in sample_groups[key]:
+                            for item in value:
+                                MergeFiles(key, item)
+                    UpdateCompleted(directory[0], Inbox)
+                    logging.info("Merging completed on {}".format(directory[0]))
+                else:
+                    subject = "Non matching md5 sums"
+                    message = "The md5 sum for {} is not correct, either files are still copying or an error has occurred during copying.".format(directory[0])
+                    SendMail(subject, message)
+                    logging.warning(message)
+
+    logging.info("Merging script finished at {}".format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+        
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config_file", help="Config file for the run combiner in .yaml format")
+    args = parser.parse_args()
+    
+    try:
+        with open(args.config_file, "r") as config_file_:
+            config_ = yaml.load(config_file_)     
+    except TypeError as missing_config:
+        default_logger("Config file not supplied. Please supply one with the --config_file argument. {} UTC".format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+        raise missing_config
+    except FileNotFoundError as file_not_found_error_:
+        default_logger("The config file supplied cannot be found. Please check the path and / or that the name of the file is correct. {} UTC. The supplied file was {}".format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime()), args.config_file))
+        raise file_not_found_error_
+    
+    main(config_)

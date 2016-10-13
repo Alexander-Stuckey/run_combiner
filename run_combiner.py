@@ -24,10 +24,10 @@ from time import strftime, gmtime
 import yaml
 from dask.compatibility import FileNotFoundError
 
-'''
-Check for the existence of files. It will check for the list of completed runs, and any gzipped, merged files that the script wants to make.
-'''
 def Check(dirPath, name):
+    """
+    Check for the existence of files. It will check for the list of completed runs, and any gzipped, merged files that the script wants to make.
+    """
     if (name == ".completed"):
         if not (os.path.isfile(dirPath + name)):
             subprocess.call(["touch", dirPath + ".completed"])
@@ -43,64 +43,68 @@ def Check(dirPath, name):
         message = "The script has entered an area that it should never reach. Please investigate."
         logging.error(message)
         logging.error("dirPath is {}, name is {}".format(dirPath,name))
-        SendMail(subject, message)
+        SendMail(subject, message, config_["email"]["admin"])
 
-'''
-Send email from python
-'''
-def SendMail(subject, message):
+def SendMail(subject, message, address):
+    """
+    Send email from python.
+    """
     msg = MIMEText(message)
     msg["From"] = "st-analysis-server@scilifelab.se"
-    msg["To"] = "alexander.stuckey@scilifelab.se"
+    msg["To"] = address
     msg["Subject"] = subject
     p = subprocess.Popen(["/usr/sbin/sendmail", "-t", "-oi"], stdin=subprocess.PIPE)
     p.communicate(msg.as_string())
 
-'''
-Return all non-hidden folders (no dot folders)
-'''
 def ListDirNoHidden(dirPath):
+    """
+    Return all non-hidden folders (no dot folders).
+    """
     allPaths = []
     for fname in os.listdir(dirPath):
         path = os.path.join(dirPath, fname)
         if os.path.isdir(path):
-            allPaths.append(path)
+            if not fname.startswith("."):
+                allPaths.append(path)
     return allPaths
 
-'''
-Get the completed runs before we start so that we don't try to process any run twice.
-'''
 def GetCompleted(dirPath):
+    """
+    Get the completed runs before we start so that we don't try to process any run twice.
+    """
     with open(os.path.join(dirPath,".completed"), "r") as f:
         completed_runs = [ line.strip() for line in f]
     return completed_runs
 
-'''
-Update the completed runs list
-'''
+
 def UpdateCompleted(completed_dir, dirPath):
+    """
+    Update the completed runs list.
+    """
     with open(os.path.join(dirPath,".completed"), "a") as f:
         f.write(completed_dir + "\n")
 
-'''
-Check the md5 hash to make sure the files are fully transferred
-'''
+
 def Checkmd5(currentDir):
+    """
+    Check the md5 hash to make sure the files are fully transferred.
+    """
     md5Status = subprocess.Popen(["/usr/local/bin/md5sum", "-c", "md5sums.txt"], cwd=currentDir)
     md5Status.wait()
     return md5Status.returncode
     
-'''
-Return a list of all the files in a directory that are to be merged. This list is then passed into the GroupSamples method.
-'''
 def FilesToBeMerged(currentDir):
+    """
+    Return a list of all the files in a directory that are to be merged. This list is then passed into the GroupSamples method.
+    """
     return glob.glob1(currentDir[0], "*.gz")
 
-'''
-Return a list of files that are to be merged into one file. This method takes as input a list of all the .gz files in a directory
-and returns a dictionary in the form {directory: [file list]} where [file list] is all the files to be merged into one file.
-'''
+
 def GroupSamples(currentDir, files):
+    """
+    Return a list of files that are to be merged into one file. This method takes as input a list of all the .gz files in a directory
+    and returns a dictionary in the form {directory: [file list]} where [file list] is all the files to be merged into one file.
+    """
     merge_list = {}
     read1 = []
     read2 = []
@@ -122,20 +126,19 @@ def GroupSamples(currentDir, files):
     merge_list[currentDir[0]] = (read1,read2)    
     return merge_list
 
-'''
-Check that we have permissions in the directory
-'''
 def CheckPermissions(currentDir):
+    """ Check that we have permission to read and write to the current directory
+    """
     if os.access(currentDir, os.R_OK) and os.access(currentDir, os.W_OK):
         return (currentDir, True)
     return (currentDir, False)
 
-'''
-Merges the files that are passed in to the function. If the output file already exists, and the script is in this function, then the 
-output file is likely to be the result of a failed run of the script and can be safely removed (which the script does).
-'''
-def MergeFiles(currentDir, samples):
 
+def MergeFiles(currentDir, samples):
+    """
+    Merges the files that are passed in to the function. If the output file already exists, and the script is in this function, then the 
+    output file is likely to be the result of a failed run of the script and can be safely removed (which the script does).
+    """
     exp_name = re.search("(.+?)_", samples[0])
     exp_sample = re.search("_(S\d+)_", samples[0])
     exp_read = re.search("_(R\d+)_", samples[0])
@@ -150,7 +153,7 @@ def MergeFiles(currentDir, samples):
             subject = "File {}.gz exists, but an error previously stopped the script".format(merged_name)
             message = "The file {}.gz exists, but the script is trying to make it again. {}.gz will be removed before continuing.".format(merged_name,merged_name)
             logging.warning(message)
-            SendMail(subject, message)
+            SendMail(subject, message, config_["email"]["admin"])
             subprocess.Popen(["rm", "-f", merged_name + ".gz"], cwd=outfolder)
         
         if merged_name + ".gz" in samples: #Probably depreciated now, with new merged folder.
@@ -172,10 +175,13 @@ def MergeFiles(currentDir, samples):
 
 
 def default_logger(msg):
+    """
+    Create a default logging instance for when the config file is absent or malformed.
+    """
     current_dir = os.path.dirname(os.path.realpath(__file__))
     logging.basicConfig(filename=os.path.join(current_dir, "run_combiner_config_error.log"), level = logging.INFO)
     logging.error(msg)
-    print "A config file error has occurred. Please see the error message in {}.".format(os.path.join(current_dir,"run_combiner_config_error.log"))
+    print "A config file error has occurred. Please see the error message in {}.\n".format(os.path.join(current_dir,"run_combiner_config_error.log"))
     
 
 def check_config(config_):
@@ -230,31 +236,32 @@ def main(config_):
         writable_directories = [directory for directory in permissions if True in directory]
         unwritable_directories = [directory for directory in permissions if (directory not in writable_directories and directory not in completed)]
         
+        
         for directory in unwritable_directories:
             subject = "Unwritable directories that are not completed"
             message = "The directory {} is unwritable. Please look into this and fix.".format(directory[0])
-            SendMail(subject, message)
+            SendMail(subject, message, config_["email"]["admin"])
             logging.warning(message)
 
-            for directory in writable_directories:
-                logging.info("Working on {}".format(directory[0]))
-                md5status = Checkmd5(directory[0])
+        for directory in writable_directories:
+            logging.info("Working on {}".format(directory[0]))
+            md5status = Checkmd5(directory[0])
 
-                if (md5status == 0):
-                    logging.info("md5sum for {} is good, proceeding".format(directory[0]))
-                    files_for_merging = FilesToBeMerged(directory)
-                    sample_groups = GroupSamples(directory, files_for_merging)
-                    for key in sample_groups:
-                        for value in sample_groups[key]:
-                            for item in value:
-                                MergeFiles(key, item)
+            if (md5status == 0):
+                logging.info("md5sum for {} is good, proceeding".format(directory[0]))
+                files_for_merging = FilesToBeMerged(directory)
+                sample_groups = GroupSamples(directory, files_for_merging)
+                for key in sample_groups:
+                    for value in sample_groups[key]:
+                        for item in value:
+                            MergeFiles(key, item)
                     UpdateCompleted(directory[0], Inbox)
                     logging.info("Merging completed on {}".format(directory[0]))
-                else:
-                    subject = "Non matching md5 sums"
-                    message = "The md5 sum for {} is not correct, either files are still copying or an error has occurred during copying.".format(directory[0])
-                    SendMail(subject, message)
-                    logging.warning(message)
+            else:
+                subject = "Non matching md5 sums"
+                message = "The md5 sum for {} is not correct, either files are still copying or an error has occurred during copying.".format(directory[0])
+                SendMail(subject, message, config_["email"]["admin"])
+                logging.warning(message)
 
     logging.info("Merging script finished at {}".format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
         

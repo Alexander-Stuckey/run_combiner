@@ -12,6 +12,9 @@ runs:
     keep_original_files: yes
 logging:
     log_file_name: path/to/log_file
+verify_transfer:
+    use_md5: yes
+    md5_path: /usr/local/bin/md5sum
 """
 
 import sys
@@ -23,14 +26,17 @@ import glob
 import logging
 import yaml
 from email.mime.text import MIMEText
-from time import strftime, gmtime
+from time import strftime, gmtime, time
 from matplotlib.compat.subprocess import CalledProcessError
+from check_config_file import check_config
 
 def check(dirPath, name, email_address):
     """
     Check for the existence of files. It will check for the list of completed 
     runs, and any gzipped, merged files that the script wants to make.
     """
+    logging.info("Checking for the existance of {}".format(
+        os.path.join(dirPath,name)))
     if (name == ".completed"):
         if not (os.path.isfile(os.path.join(dirPath + name))):
             open(os.path.join(dirPath,name),"a+").close()
@@ -58,6 +64,7 @@ def send_mail(subject, message, address):
     p = subprocess.Popen(["/usr/sbin/sendmail", "-t", "-oi"],
                          stdin=subprocess.PIPE)
     p.communicate(msg.as_string())
+    logging.info("Email sent to {}".format(address))
 
 def list_dir_no_hidden(dirPath):
     """
@@ -88,14 +95,24 @@ def update_completed(completed_dir, dirPath):
     with open(os.path.join(dirPath,".completed"), "a") as f:
         f.write(completed_dir + "\n")
 
-def check_md5(currentDir):
+def check_md5(currentDir,md5_path):
     """
     Check the md5 hash to make sure the files are fully transferred.
     """
-    md5Status = subprocess.Popen(["/usr/local/bin/md5sum", "-c", "md5sums.txt"],
+    logging.info("Checking the md5 status of files in {}".format(currentDir))
+    md5Status = subprocess.Popen([md5_path, "-c", "md5sums.txt"],
                                  cwd=currentDir)
     md5Status.wait()
     return md5Status.returncode
+
+def check_timestamps(current_dir,time_):
+    file_list = files_to_be_merged(current_dir)
+    fails_ = 0
+    for file_ in file_list:
+        mtime = os.path.getmtime(os.path.join(current_dir,file_))
+        if (time_ - mtime) < 7200:
+            fails_ += 1
+    return fails_
     
 def files_to_be_merged(currentDir):
     """
@@ -148,6 +165,7 @@ def merge_files(currentDir, samples, keep_samples, email_address, in_folder, out
     is likely to be the result of a failed run of the script and can be safely 
     removed.
     """
+    logging.info("Merging files in {}".format(in_folder))
     if not os.path.isdir(os.path.join(currentDir, out_folder)):
         os.mkdir(os.path.join(currentDir, out_folder))
     
@@ -156,9 +174,12 @@ def merge_files(currentDir, samples, keep_samples, email_address, in_folder, out
     exp_read = re.search("_(R\d+)_", samples[0])
     merged_name = (exp_name.group(1) + "_" + exp_sample.group(1) + "_" 
     + exp_read.group(1) + ".fastq")
-    
+        
     infolder = os.path.join(currentDir,in_folder)
     outfolder = os.path.join(currentDir, out_folder)
+    
+    logging.info("Writing output to {}.".format(os.path.join(outfolder,
+                                                             merged_name)))
     
     file_exists = check(outfolder, merged_name + ".gz", email_address)
     
@@ -172,19 +193,45 @@ def merge_files(currentDir, samples, keep_samples, email_address, in_folder, out
         send_mail(subject, message, email_address)
         subprocess.Popen(["rm", "-f", merged_name + ".gz"], cwd=outfolder)
     else:
+        logging.info("Beginning merging on {} at {}.".format(samples,
+                                strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
         for sample in samples:
+            logging.info("Merging sample {}...".format(sample))
             with open(os.path.join(outfolder, merged_name), "a+") as outfile:
-                subprocess.Popen(["/usr/bin/gzip", "-dc", sample],
+                decompress = subprocess.Popen(["/usr/bin/gzip", "-dc", sample],
                                  stdout=outfile, cwd=infolder)
-        
-        subprocess.Popen(["gzip", merged_name], cwd=outfolder)
-        
+                decompress.wait()
+                logging.info("Merging for sample {} finished at {}.".format(
+                        sample,strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+        logging.info("Starting compression on {} at {}.".format(merged_name,
+                                strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+        compress = subprocess.Popen(["gzip", merged_name], cwd=outfolder)
+        compress.wait()
+        logging.info("Finished compression on {} at {}.".format(merged_name,
+                                strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
         delete_samples(infolder, samples, keep_samples)
 
 def delete_samples(currentDir, samples, keep_samples):
     if not keep_samples:
         [subprocess.Popen(["rm", "-f", sample], cwd=currentDir) for sample
          in samples]
+        
+def parse_sample_sheet(currentDir,admin_email):
+    """
+    Parse the sample sheet in the run directory to extract the investigator
+    email so that an email can be sent when the merging finishes.
+    """
+    email_ = admin_email
+    try:
+        with open(os.path.join(currentDir,"SampleSheet.csv","r")) as sample_sheet:
+            for line in sample_sheet:
+                email_line = re.search("^Investigator Name", line)
+                email_ = email_line.split(",")[1]
+    except IOError:
+        logging.error("The samplesheet does not exist in {}, or an error "
+                      "occurred while trying to open it. Defaulting to admin "
+                      "email {}.".format(currentDir,admin_email)) 
+    return email_
 
 def default_logger(msg):
     """
@@ -198,56 +245,6 @@ def default_logger(msg):
     logging.error(msg)
     print ("A config file error has occurred. Please see the error message in "
     "{}.\n".format(os.path.join(current_dir,"run_combiner_config_error.log")))
-
-def check_config(config_):
-    """ Check that the config file is formatted properly"""
-    
-    if "email" not in config_:
-        default_logger("Email field missing from config file. Please add a "
-        "valid email field in the config file")
-        raise KeyError
-    else:
-        if "admin" not in config_["email"]:
-            default_logger("The email field is present, but missing the admin "
-                           "email. Please enter the admin email in the "
-                           "following format: admin: email@address")
-            raise KeyError
-    
-    if "runs" not in config_:
-        default_logger("Runs field missing from config file. Please add a "
-        "valid runs field in the config file.")
-        raise KeyError
-    else:
-        if "in_folder" not in config_["runs"]:
-            default_logger("The input folder path is missing from the config "
-            "file. Please enter the input folder path in the following format: "
-            "in_folder: /path/to/input_folder")
-            raise KeyError
-        elif "out_folder" not in config_["runs"]:
-            default_logger("The output folder path is missing from the config "
-            "file. Please enter the output folder path in the following format:"
-            " out_folder: /path/to/out_folder")
-            raise KeyError
-        elif "keep_original_files" not in config_["runs"]:
-            default_logger("Please indicate if you would like to keep the "
-            "original files. Valid entries are yes|no, True|False. Add it to the"
-            " config file in he following format: keep_original_files: yes")
-            raise KeyError
-        elif "runs_folder" not in config_["runs"]:
-            default_logger("The runs folder is missing from the config file. "
-                           "Please enter the runs folder in the following "
-                           "format: runs_folder: /path/to/runs_folder")
-            raise KeyError
-    
-    if "logging" not in config_:
-        default_logger("Logging field missing from config file. Please add a "
-        "valid logging field in the config file.")
-        raise KeyError
-        if "log_file" not in config_["logging"]:
-            default_logger("The log file name is missing from the config file. "
-            "Please enter a valid log file name in the following format: "
-            "log_file_name: file_name.log")
-            raise KeyError 
 
 def main(config_file):
     
@@ -266,18 +263,21 @@ def main(config_file):
                                                    gmtime())))
         sys.exit(1)
     try:
-        check_config(config_)
-    except KeyError:
+        check_config(config_)      
+    except KeyError as e:
+        print (e.message)
         sys.exit(1)
-        
-    Inbox = config_["runs"]["runs_folder"]
-    check(Inbox, ".completed", config_["email"]["admin"])
     
     logging.basicConfig(filename=os.path.join(config_["logging"]["log_file"]),
                         level = logging.INFO)
     logging.info("Merging script started at {}".
                  format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
-    
+
+    logging.info("Config file loaded and parsed successfully at {}."
+                       .format(strftime("%H:%M:%S, %A, %B %d, %Y",gmtime())))      
+    Inbox = config_["runs"]["runs_folder"]
+    logging.info("Base runs folder is {}".format(Inbox))
+    check(Inbox, ".completed", config_["email"]["admin"]) 
     completed = get_completed(Inbox)
     directories = list_dir_no_hidden(Inbox)
     permissions = [check_permissions(directory) for directory in directories 
@@ -295,17 +295,34 @@ def main(config_file):
         message = "The directory {} is unwritable. ".format(directory[0])
         send_mail(subject, message, config_["email"]["admin"])
         logging.warning(message)
-
+    
+    logging.info("List of runs to merge: {}".format([dir_[0] for dir_ in 
+                                                     writable_directories]))
     for directory in writable_directories:
         logging.info("Working on {}".format(directory[0]))
         
+        md5status = 1
+        timestamp = 1
+        
         try:
-            md5status = check_md5(os.path.join(directory[0],
-                                               config_["runs"]["in_folder"]))
-    
-            if md5status == 0:
-                logging.info("md5sum for {} is good, proceeding"
+            if config_["verify_transfer"]["use_md5"]:
+                logging.info("Using md5sums to verify transfer.")
+                md5status = check_md5(os.path.join(directory[0],
+                                               config_["runs"]["in_folder"]),
+                                      config_["verify_transfer"]["md5_path"])
+            else:
+                logging.info("Using timestamps to verify transfer.")
+                timestamp = check_timestamps(os.path.join(directory[0],
+                                              config_["runs"]["in_folder"]),
+                                             time())
+            
+            if md5status == 0 or timestamp == 0:
+                if md5status == 0:
+                    logging.info("md5sum for {} is good, proceeding"
                              .format(directory[0]))
+                else:
+                    logging.info("Timestamps for {} are good, proceeding"
+                                 .format(directory[0]))
                 files_for_merging = files_to_be_merged(os.path.join(
                     directory[0],config_["runs"]["in_folder"]))
                 sample_groups = group_samples(directory, files_for_merging)
@@ -320,9 +337,10 @@ def main(config_file):
                     update_completed(directory[0], Inbox)
                     logging.info("Merging completed on {}".format(directory[0]))
             else:
-                subject = "Non matching md5 sums"
-                message = ("The md5 sum for {} is not correct, either files are "
-                           "still copying or an error has occurred during copying."
+                subject = "Non matching md5 sums or timestamps too young"
+                message = ("Either the md5 sum for {} is not correct, or the "
+                           "timestamp is too recent. Files are still copying "
+                           "or an error has occurred during copying."
                            .format(directory[0]))
                 send_mail(subject, message, config_["email"]["admin"])
                 logging.warning(message)
@@ -331,7 +349,8 @@ def main(config_file):
                           .format(strftime("%H:%M:%S, %A, %B %d, %Y",gmtime())),
                           exc_info = True)
         except OSError:
-            logging.error("An error has occurred. {}", exc_info = True)
+            logging.error("An error has occurred. Working in directory {}"
+                          .format(directory[0]), exc_info = True)
         except CalledProcessError:
             logging.error("The called system process has exited with an error ",
                           exc_info = True)
@@ -340,10 +359,18 @@ def main(config_file):
                           "to does not exist. {}."
                           .format(strftime("%H:%M:%S, %A, %B %d, %Y",
                                            gmtime())), exc_info = True)
-
-    logging.info("Merging script finished at {}"
-                 .format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+        if config_["email"]["parse_ss"]:
+            email_ = parse_sample_sheet(directory[0], config_["email"]["admin"])
+        else:
+            email_ = config_["email"]["admin"]
+        subject = "Run finished merging."
+        msg = ("The run {} has finished merging. Feel free to start work on "
+               "it at any time.".format(directory[0]))
+        send_mail(subject, msg, email_)
         
+    logging.info("Merging script finished at {}\n"
+                 .format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
+      
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -352,8 +379,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     main(args.config_file)
-    
-"""
-Todo:
-Add email to person when run is finished merging - requires samplesheet changes
-"""

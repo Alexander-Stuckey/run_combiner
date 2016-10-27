@@ -21,7 +21,7 @@ def check_config(config_):
                 raise KeyError("The email field is present, but missing the "
                                "admin email. Please enter the admin email in "
                                "the following format: admin: email@address")
-            if "parse_ss" not in config_["email"]:
+            if "use_ss_email" not in config_["email"]:
                 raise KeyError("Please indicate if you want to parse the "
                                "sample sheet for the investigator email. "
                                "Valid entries are yes|no, True|False.")

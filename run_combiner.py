@@ -30,28 +30,17 @@ from time import strftime, gmtime, time
 from matplotlib.compat.subprocess import CalledProcessError
 from check_config_file import check_config
 
-def check(dirPath, name, email_address):
+def check(dirPath, name):
     """
     Check for the existence of files. It will check for the list of completed 
     runs, and any gzipped, merged files that the script wants to make.
     """
     logging.info("Checking for the existance of {}".format(
         os.path.join(dirPath,name)))
-    if (name == ".completed"):
-        if not (os.path.isfile(os.path.join(dirPath + name))):
-            open(os.path.join(dirPath,name),"a+").close()
-    elif (os.path.splitext(name)[1] == ".gz"):
-        if (os.path.isfile(os.path.join(dirPath,name))):
-            return True
-        else:
-            return False
+    if os.path.isfile(os.path.join(dirPath,name)):
+        return True
     else:
-        subject = "Script in odd location error"
-        message = ("The script has entered an area that it should never reach. "
-                   "Please investigate.")
-        logging.error(message)
-        logging.error("dirPath is {}, name is {}".format(dirPath,name))
-        send_mail(subject, message, email_address)
+        return False
 
 def send_mail(subject, message, address):
     """
@@ -158,7 +147,8 @@ def check_permissions(currentDir):
     return (currentDir, False)
 
 
-def merge_files(currentDir, samples, keep_samples, email_address, in_folder, out_folder):
+def merge_files(currentDir, samples, keep_samples, email_address, in_folder,
+                out_folder, ss_info):
     """
     Merges the files that are passed in to the function. If the output file 
     already exists, and the script is in this function, then the  output file 
@@ -170,10 +160,10 @@ def merge_files(currentDir, samples, keep_samples, email_address, in_folder, out
         os.mkdir(os.path.join(currentDir, out_folder))
     
     exp_name = re.search("(.+?)_", samples[0])
-    exp_sample = re.search("_(S\d+)_", samples[0])
+    exp_sample = re.search("_S(\d+)_", samples[0])
     exp_read = re.search("_(R\d+)_", samples[0])
-    merged_name = (exp_name.group(1) + "_" + exp_sample.group(1) + "_" 
-    + exp_read.group(1) + ".fastq")
+    merged_name = (exp_name.group(1) + "_" + ss_info[int(exp_sample.group(1))-1] +
+                   "_" + exp_read.group(1) + ".fastq")
         
     infolder = os.path.join(currentDir,in_folder)
     outfolder = os.path.join(currentDir, out_folder)
@@ -181,9 +171,19 @@ def merge_files(currentDir, samples, keep_samples, email_address, in_folder, out
     logging.info("Writing output to {}.".format(os.path.join(outfolder,
                                                              merged_name)))
     
-    file_exists = check(outfolder, merged_name + ".gz", email_address)
+    fastq_exists = check(outfolder, merged_name)
+    gz_exists = check(outfolder, merged_name + ".gz")
     
-    if (file_exists == True):
+    if fastq_exists:
+        subject = ("File {} exists, but an error previously stopped the "
+                   "script".format(merged_name))
+        message = ("The file {} exists, but the script is trying to make"
+        " it again. {} will be removed before continuing."
+        .format(merged_name,merged_name))
+        logging.warning(message)
+        send_mail(subject, message, email_address)
+        subprocess.Popen(["rm", "-f", merged_name], cwd=outfolder)
+    elif gz_exists:
         subject = ("File {}.gz exists, but an error previously stopped the "
                    "script".format(merged_name))
         message = ("The file {}.gz exists, but the script is trying to make"
@@ -216,22 +216,35 @@ def delete_samples(currentDir, samples, keep_samples):
         [subprocess.Popen(["rm", "-f", sample], cwd=currentDir) for sample
          in samples]
         
-def parse_sample_sheet(currentDir,admin_email):
+def parse_sample_sheet(currentDir,admin_email,use_ss_email):
     """
-    Parse the sample sheet in the run directory to extract the investigator
-    email so that an email can be sent when the merging finishes.
+    Parse the sample sheet in the run directory to extract the sample names
+    (to cover cases where the sample sheet has been incorrectly filled out and
+    information is missing from the fastq file names). Additionally, the 
+    investigator email can be obtained so that an email can be sent when the 
+    merging finishes.
     """
+    found_data = False
+    samples = []
     email_ = admin_email
     try:
-        with open(os.path.join(currentDir,"SampleSheet.csv","r")) as sample_sheet:
+        with open(os.path.join(currentDir,"SampleSheet.csv"),"r") as sample_sheet:
             for line in sample_sheet:
-                email_line = re.search("^Investigator Name", line)
-                email_ = email_line.split(",")[1]
+                if use_ss_email:
+                    email_ = re.search("^Investigator Name,(.+)", line)
+                if not found_data:
+                    if re.search("[Data]", line):
+                        found_data = True
+                if found_data:
+                    if line.startswith("1"):
+                        samples.append(line.split(",")[1] + "_" +
+                                       line.split(",")[2])
     except IOError:
         logging.error("The samplesheet does not exist in {}, or an error "
                       "occurred while trying to open it. Defaulting to admin "
                       "email {}.".format(currentDir,admin_email)) 
-    return email_
+    samples_and_email = (samples,email_)
+    return samples_and_email
 
 def default_logger(msg):
     """
@@ -270,6 +283,7 @@ def main(config_file):
     
     logging.basicConfig(filename=os.path.join(config_["logging"]["log_file"]),
                         level = logging.INFO)
+    logging.info("\n")
     logging.info("Merging script started at {}".
                  format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
 
@@ -277,7 +291,10 @@ def main(config_file):
                        .format(strftime("%H:%M:%S, %A, %B %d, %Y",gmtime())))      
     Inbox = config_["runs"]["runs_folder"]
     logging.info("Base runs folder is {}".format(Inbox))
-    check(Inbox, ".completed", config_["email"]["admin"]) 
+    runs_file = check(Inbox, ".completed")
+    if not runs_file:
+        open(os.path.join(config_["runs"]["runs_folder"],".completed"),
+             "a+").close() 
     completed = get_completed(Inbox)
     directories = list_dir_no_hidden(Inbox)
     permissions = [check_permissions(directory) for directory in directories 
@@ -325,6 +342,9 @@ def main(config_file):
                                  .format(directory[0]))
                 files_for_merging = files_to_be_merged(os.path.join(
                     directory[0],config_["runs"]["in_folder"]))
+                ss_info = parse_sample_sheet(directory[0],
+                                             config_["email"]["admin"],
+                                             config_["email"]["use_ss_email"])
                 sample_groups = group_samples(directory, files_for_merging)
                 for key in sample_groups:
                     for value in sample_groups[key]:
@@ -333,7 +353,8 @@ def main(config_file):
                                         config_["runs"]["keep_original_files"],
                                         config_["email"]["admin"],
                                         config_["runs"]["in_folder"],
-                                        config_["runs"]["out_folder"])
+                                        config_["runs"]["out_folder"],
+                                        ss_info[0])
                     update_completed(directory[0], Inbox)
                     logging.info("Merging completed on {}".format(directory[0]))
             else:
@@ -359,14 +380,11 @@ def main(config_file):
                           "to does not exist. {}."
                           .format(strftime("%H:%M:%S, %A, %B %d, %Y",
                                            gmtime())), exc_info = True)
-        if config_["email"]["parse_ss"]:
-            email_ = parse_sample_sheet(directory[0], config_["email"]["admin"])
-        else:
-            email_ = config_["email"]["admin"]
+        
         subject = "Run finished merging."
         msg = ("The run {} has finished merging. Feel free to start work on "
                "it at any time.".format(directory[0]))
-        send_mail(subject, msg, email_)
+        send_mail(subject, msg, ss_info[1])
         
     logging.info("Merging script finished at {}\n"
                  .format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))

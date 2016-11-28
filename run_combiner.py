@@ -15,6 +15,12 @@ logging:
 verify_transfer:
     use_md5: yes
     md5_path: /usr/local/bin/md5sum
+users:
+    run_script: st.bioinfo
+database:
+    name: ST_Run_Combiner
+    table_name: ST_Run_Combiner_Data
+    location: /home/st.bioinfo/SQLite
 """
 
 import sys
@@ -25,6 +31,7 @@ import subprocess
 import glob
 import logging
 import yaml
+import sqlite3
 from email.mime.text import MIMEText
 from time import strftime, gmtime, time
 from matplotlib.compat.subprocess import CalledProcessError
@@ -258,10 +265,62 @@ def default_logger(msg):
     logging.error(msg)
     print ("A config file error has occurred. Please see the error message in "
     "{}.\n".format(os.path.join(current_dir,"run_combiner_config_error.log")))
+    
+def get_current_pid():
+    """
+    Get the PID for the current script run.
+    """
+    return str(os.getpid())
+
+def get_running_pid(user):
+    """
+    Check all running PIDs to see what ones are running python
+    """
+    running_processes = subprocess.Popen(["ps", "-u", user],
+                                         stdout=subprocess.PIPE)
+    check_processes = subprocess.Popen(["grep", "\s[0-9]*\s"],
+                                       stdin=running_processes.stdout,
+                                       stdout=subprocess.PIPE)
+    python_processes = subprocess.Popen(["grep", "\s"+"python$"],
+                                        stdin=check_processes.stdout,
+                                        stdout=subprocess.PIPE)
+    running_processes.stdout.close()
+    check_processes.stdout.close()
+    out = python_processes.communicate()
+    pids = []
+    for process in out:
+        if process is not None:
+            pids.append(int(process.split(" ")[1]))
+    return pids
+    
+def connect_to_db(location_, name_):
+    connection = sqlite3.connect(os.path.join(location_,name_))
+    return connection
+
+def create_db_table(connection, table_name):
+    conn_cursor = connection.cursor()
+    conn_cursor.execute("CREATE TABLE IF NOT EXISTS {} (Run_ID text, "
+                       "Process_ID int, Status text, Email text, Name text)"
+                       .format(table_name))
+    connection.commit()
+
+def check_db_table(connection, table_name):
+    tb_exists = ("SELECT name FROM sqlite_master WHERE type='table' AND "
+                 "name='{}'".format(table_name))
+    if not connection.execute(tb_exists).fetchone():
+        create_db_table(connection,table_name)
+        
+def select_from_db(connection, table_name, column_name, selection, select_type):
+    conn_cursor = connection.cursor()
+    selection = conn_cursor.execute("SELECT * FROM {} {} {} = '{}'"
+                                    .format(table_name, select_type, 
+                                            column_name, selection))
+    return selection.fetchall()
+
 
 def main(config_file):
     
-    if not os.path.isfile(config_file):
+    if not (config_file is None or os.path.isfile(config_file)):
         default_logger("Config file not supplied. Please supply one with the "
         "--config_file argument. {} UTC"
         .format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
@@ -291,6 +350,30 @@ def main(config_file):
                        .format(strftime("%H:%M:%S, %A, %B %d, %Y",gmtime())))      
     Inbox = config_["runs"]["runs_folder"]
     logging.info("Base runs folder is {}".format(Inbox))
+    
+    logging.info("Connecting to run database: {}".format(config_["database"]
+                                                         ["name"]))
+    conn = connect_to_db(config_["database"]["location"],
+                         config_["database"]["name"])
+    
+    check_db_table(conn, config_["database"]["table_name"])
+    
+    running_pids = get_running_pid(config_["users"]["user"])
+    
+    print running_pids
+    
+    not_completed = select_from_db(conn, "ST_Run_Combiner_Data", "Status",
+                                   "Completed", "WHERE NOT")
+    completed = select_from_db(conn, "ST_Run_Combiner_Data", "Status",
+                               "Completed", "WHERE")
+
+    print not_completed
+    print completed
+
+    
+    for item in running_pids:
+        print [a for a in not_completed if item in not_completed]
+    '''
     runs_file = check(Inbox, ".completed")
     if not runs_file:
         open(os.path.join(config_["runs"]["runs_folder"],".completed"),
@@ -308,7 +391,7 @@ def main(config_file):
     
     
     for directory in unwritable_directories:
-        subject = "Unwritable directories that are not completed"
+        subject = "Unwritable directories that are not completed" 
         message = "The directory {} is unwritable. ".format(directory[0])
         send_mail(subject, message, config_["email"]["admin"])
         logging.warning(message)
@@ -389,6 +472,8 @@ def main(config_file):
     logging.info("Merging script finished at {}\n"
                  .format(strftime("%H:%M:%S, %A, %B %d, %Y", gmtime())))
       
+'''
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -397,3 +482,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     main(args.config_file)
+    
+'''
+Todo
+
+Get pid of script when script runs, pid = str(os.getpid())
+store the pid in the database as well, and use pid plus status to check where
+the program is at.
+
+Check that the pid stored in the database still exists. If it does, the Program
+is working. If it does not, the program has crashed, and we need to start
+again with that run.
+
+ps -u [user] returns all the processes run by a user on the system.
+'''
+    
